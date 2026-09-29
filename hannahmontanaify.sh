@@ -198,6 +198,16 @@ if [ -e "$TARGET/etc/default/grub" ]; then
         'GRUB_DISTRIBUTOR="Hannah Montana Linux 26"' \
         'GRUB_BACKGROUND=/boot/grub/hml-grub.png' \
         >> "$TARGET/etc/default/grub"
+    # Mint/Ubuntu source /etc/default/grub.d/*.cfg AFTER /etc/default/grub and
+    # can reset GRUB_DISTRIBUTOR there (e.g. Mint's 50_linuxmint.cfg), which
+    # would undo the label above. Drop a late-sorting override that wins.
+    if [ -d "$TARGET/etc/default/grub.d" ]; then
+        claim etc/default/grub.d/99-hannah-montana.cfg
+        printf '%s\n' \
+            'GRUB_DISTRIBUTOR="Hannah Montana Linux 26"' \
+            'GRUB_BACKGROUND=/boot/grub/hml-grub.png' \
+            > "$TARGET/etc/default/grub.d/99-hannah-montana.cfg"
+    fi
 fi
 
 # --------------------------------------------------------------- plymouth ---
@@ -399,6 +409,11 @@ for home in /home/*; do
         continue
     elif [ -s "\$saved" ]; then
         echo "[restore] restoring wallpaper/icon settings for \$user"
+        # \$saved has one "schema key value" line per setting. The escaping below
+        # renders in the generated restore script as the inner shell seeing:
+        #   dbus-run-session -- sh -c 'while read -r s k v; do
+        #       gsettings set "\$s" "\$k" "\$v" 2>/dev/null; done; true'
+        # i.e. \$s/\$k/\$v are expanded by that innermost shell, not here.
         su - "\$user" -c "dbus-run-session -- sh -c 'while read -r s k v; do gsettings set \"\\\$s\" \"\\\$k\" \"\\\$v\" 2>/dev/null; done; true'" \\
             < "\$saved" 2>/dev/null || true
     else
