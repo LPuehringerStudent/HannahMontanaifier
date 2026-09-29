@@ -30,6 +30,18 @@ die()  { printf '[test-live] ERROR: %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" = "0" ] || die "run me as root:  sudo ./test-live.sh"
 [ -f "$MAIN" ]       || die "can't find hannahmontanaify.sh next to me ($MAIN)"
 
+# The main script silently no-ops (exit 0) on a system already reporting
+# ID=hml, which would leave us rebuilding boot config around missing themes
+# and with no restore kit. Refuse up front instead.
+if grep -q '^ID=hml' /etc/os-release 2>/dev/null; then
+    if [ -x /usr/local/sbin/hannahmontanaifier-restore ]; then
+        die "already pranked — undo first with:  sudo ./restore-live.sh"
+    fi
+    die "/etc/os-release says ID=hml but there's no restore kit — a previous run
+    left the system half-restored. Fix os-release first (on Debian/Ubuntu/Mint:
+    sudo apt install --reinstall base-files), then retry."
+fi
+
 ASSUME_YES=0
 [ "${1:-}" = "-y" ] || [ "${1:-}" = "--yes" ] && ASSUME_YES=1
 
@@ -64,6 +76,16 @@ if command -v plymouth-set-default-theme >/dev/null 2>&1; then
     plymouth-set-default-theme -R hannah-montana 2>/dev/null \
         || update-initramfs -u 2>/dev/null \
         || warn "initramfs rebuild failed (non-fatal)"
+elif [ -f /var/lib/dpkg/alternatives/default.plymouth ] && command -v update-alternatives >/dev/null 2>&1; then
+    # Debian/Ubuntu/Mint: the initramfs hook takes the splash from the
+    # default.plymouth alternative. The restore kit removes this again.
+    log "activating Plymouth boot splash (default.plymouth alternative, rebuilds initramfs)"
+    hml_ply=/usr/share/plymouth/themes/hannah-montana/hannah-montana.plymouth
+    { update-alternatives --install "$(sed -n 2p /var/lib/dpkg/alternatives/default.plymouth)" \
+            default.plymouth "$hml_ply" 100 \
+        && update-alternatives --set default.plymouth "$hml_ply" \
+        && update-initramfs -u; } >/dev/null 2>&1 \
+        || warn "plymouth theme activation failed (non-fatal)"
 elif command -v update-initramfs >/dev/null 2>&1; then
     update-initramfs -u 2>/dev/null || warn "update-initramfs failed (non-fatal)"
 fi
@@ -158,22 +180,32 @@ apply_live_wallpaper() {
     else warn "unknown desktop; set the wallpaper manually"; return 0
     fi
     log "setting $de wallpaper/icons for $LIVE_USER (live session)"
-    _gs() { sudo -u "$LIVE_USER" \
+    # Save the user's current values ("schema key value" lines, the format the
+    # restore kit and restore-live.sh replay) before overwriting them.
+    saved=/var/backups/hannahmontanaifier/gsettings/$LIVE_USER
+    mkdir -p "$(dirname "$saved")"
+    _run() { sudo -u "$LIVE_USER" \
         DISPLAY="${DISPLAY:-:0}" \
         DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
-        gsettings "$@" 2>/dev/null || warn "gsettings $* failed (relog to see it)"; }
+        gsettings "$@" 2>/dev/null; }
+    _gs() {
+        if ! grep -q "^$1 $2 " "$saved" 2>/dev/null; then
+            old=$(_run get "$1" "$2") && printf '%s %s %s\n' "$1" "$2" "$old" >> "$saved"
+        fi
+        _run set "$1" "$2" "$3" || warn "gsettings set $* failed (relog to see it)"
+    }
     case "$de" in
         cinnamon)
-            _gs set org.cinnamon.desktop.background picture-uri "file://$WALLPAPER"
-            _gs set org.cinnamon.desktop.background picture-options zoom
-            _gs set org.cinnamon.desktop.interface icon-theme HannahMontana ;;
+            _gs org.cinnamon.desktop.background picture-uri "file://$WALLPAPER"
+            _gs org.cinnamon.desktop.background picture-options zoom
+            _gs org.cinnamon.desktop.interface icon-theme HannahMontana ;;
         mate)
-            _gs set org.mate.background picture-filename "$WALLPAPER"
-            _gs set org.mate.interface icon-theme HannahMontana ;;
+            _gs org.mate.background picture-filename "$WALLPAPER"
+            _gs org.mate.interface icon-theme HannahMontana ;;
         gnome)
-            _gs set org.gnome.desktop.background picture-uri "file://$WALLPAPER"
-            _gs set org.gnome.desktop.background picture-uri-dark "file://$WALLPAPER"
-            _gs set org.gnome.desktop.interface icon-theme HannahMontana ;;
+            _gs org.gnome.desktop.background picture-uri "file://$WALLPAPER"
+            _gs org.gnome.desktop.background picture-uri-dark "file://$WALLPAPER"
+            _gs org.gnome.desktop.interface icon-theme HannahMontana ;;
     esac
 }
 theme_gdm_greeter

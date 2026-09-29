@@ -36,11 +36,20 @@ reset_live_wallpaper() {
     elif [ -e /usr/bin/gnome-shell ]; then de=gnome
     else return 0
     fi
-    log "resetting $de wallpaper/icons for $LIVE_USER (live session)"
-    _gr() { sudo -u "$LIVE_USER" \
+    _run() { sudo -u "$LIVE_USER" \
         DISPLAY="${DISPLAY:-:0}" \
         DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
-        gsettings reset "$@" 2>/dev/null || true; }
+        gsettings "$@" </dev/null 2>/dev/null || true; }
+    # Replay the values test-live.sh saved; must run before the restore kit,
+    # which deletes the backup dir.
+    saved=/var/backups/hannahmontanaifier/gsettings/$LIVE_USER
+    if [ -s "$saved" ]; then
+        log "restoring $LIVE_USER's own wallpaper/icons (live session)"
+        while read -r s k v; do _run set "$s" "$k" "$v"; done < "$saved"
+        return 0
+    fi
+    log "resetting $de wallpaper/icons for $LIVE_USER (live session)"
+    _gr() { _run reset "$@"; }
     case "$de" in
         cinnamon)
             _gr org.cinnamon.desktop.background picture-uri

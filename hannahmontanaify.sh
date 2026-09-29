@@ -44,13 +44,23 @@ fi
 BACKUP="$TARGET/var/backups/hannahmontanaifier"
 FILES="$BACKUP/files"          # mirrors absolute paths of overwritten originals
 INSTALLED="$BACKUP/installed.list"  # newly created files (deleted on restore)
+DIRS="$BACKUP/dirs.list"       # newly created parent dirs (rmdir'd on restore if empty)
 mkdir -p "$FILES"
 : >> "$INSTALLED"
+: >> "$DIRS"
+
+# Restore-kit state; the plymouth section overwrites these when it runs.
+OLD_PLYMOUTH_THEME=bgrt
+PLY_ALT_LINK=""       # Debian/Ubuntu/Mint default.plymouth alternative, if any
+OLD_PLY_ALT=""
+OLD_PLY_ALT_MODE=""
+HML_PLYMOUTH=/usr/share/plymouth/themes/hannah-montana/hannah-montana.plymouth
 
 # bcp <absolute path> — back up an existing target file before overwriting it.
+# A symlink is backed up as the link itself (cp -a), so restore puts the link back.
 bcp() {
     rel="${1#/}"
-    if [ -e "$TARGET/$rel" ] && [ ! -e "$FILES/$rel" ]; then
+    if { [ -e "$TARGET/$rel" ] || [ -L "$TARGET/$rel" ]; } && [ ! -e "$FILES/$rel" ] && [ ! -L "$FILES/$rel" ]; then
         mkdir -p "$FILES/$(dirname "$rel")"
         cp -a "$TARGET/$rel" "$FILES/$rel" 2>/dev/null || warn "backup failed: /$rel"
     fi
@@ -61,24 +71,59 @@ track() {
     grep -qxF "$1" "$INSTALLED" 2>/dev/null || printf '%s\n' "$1" >> "$INSTALLED"
 }
 
-# put <src> <dest relative path> — install a file, backing up any original.
-put() {
-    src="$1"; rel="$2"
-    if [ -e "$TARGET/$rel" ]; then
+# claim <relative path> — make a target file safe to (over)write: back up an
+# existing original, or track it as new. A symlink (e.g. Debian's
+# /etc/os-release -> ../usr/lib/os-release) is replaced by a regular copy of
+# its content, so writes never go through it into a package-owned file.
+claim() {
+    rel="$1"
+    if [ -e "$TARGET/$rel" ] || [ -L "$TARGET/$rel" ]; then
         bcp "/$rel"
+        if [ -L "$TARGET/$rel" ]; then
+            lt=$(readlink "$TARGET/$rel")
+            case "$lt" in
+                /*) lsrc="$TARGET$lt" ;;
+                *)  lsrc="$TARGET/$(dirname "$rel")/$lt" ;;
+            esac
+            if cp "$lsrc" "$TARGET/$rel.hml-tmp" 2>/dev/null; then
+                mv -f "$TARGET/$rel.hml-tmp" "$TARGET/$rel"
+            else
+                rm -f "$TARGET/$rel.hml-tmp" "$TARGET/$rel"
+            fi
+        fi
     else
         track "$rel"
     fi
-    mkdir -p "$TARGET/$(dirname "$rel")"
+    mkparents "$rel"
+}
+
+# mkparents <relative path> — create the parent dirs of a target path,
+# recording each one that didn't exist so restore can remove it again.
+mkparents() {
+    d=$(dirname "$1")
+    while [ "$d" != . ] && [ "$d" != / ] && [ ! -d "$TARGET/$d" ]; do
+        grep -qxF "$d" "$DIRS" 2>/dev/null || printf '%s\n' "$d" >> "$DIRS"
+        d=$(dirname "$d")
+    done
+    mkdir -p "$TARGET/$(dirname "$1")"
+}
+
+# put <src> <dest relative path> — install a file, backing up any original.
+# Installed as root; install_user_stuff re-chowns files in home directories.
+put() {
+    src="$1"; rel="$2"
+    claim "$rel"
     cp -a "$src" "$TARGET/$rel" || warn "install failed: /$rel"
+    chown 0:0 "$TARGET/$rel" 2>/dev/null || true
 }
 
 # puttree <src dir> <dest relative dir> — install a directory tree.
 puttree() {
     src="$1"; rel="$2"
-    [ -e "$TARGET/$rel" ] || track "$rel"
-    mkdir -p "$TARGET/$(dirname "$rel")"
+    [ -e "$TARGET/$rel" ] && existed=1 || { existed=0; track "$rel"; }
+    mkparents "$rel"
     cp -a "$src" "$TARGET/$rel" || warn "install failed: /$rel"
+    [ "$existed" = 1 ] || chown -R 0:0 "$TARGET/$rel" 2>/dev/null || true
 }
 
 log "target: $TARGET"
@@ -117,7 +162,7 @@ LOGIN_BG=/usr/share/backgrounds/hannahmontanaifier/login.png
 log "rewriting OS identity (os-release, lsb-release, issue)"
 put "$SYS/etc/os-release" etc/os-release
 if [ -e "$TARGET/etc/lsb-release" ]; then
-    bcp /etc/lsb-release
+    claim etc/lsb-release
     printf '%s\n' \
         'DISTRIB_ID=HannahMontana' \
         'DISTRIB_RELEASE=26.0' \
@@ -125,17 +170,17 @@ if [ -e "$TARGET/etc/lsb-release" ]; then
         'DISTRIB_DESCRIPTION="Hannah Montana Linux 26"' \
         > "$TARGET/etc/lsb-release"
 fi
-bcp /etc/issue
+claim etc/issue
 printf 'Hannah Montana Linux 26 \\n \\l\n\n' > "$TARGET/etc/issue"
-[ -e "$TARGET/etc/issue.net" ] && bcp /etc/issue.net || track etc/issue.net
+claim etc/issue.net
 printf 'Hannah Montana Linux 26\n' > "$TARGET/etc/issue.net"
 
 if [ -n "$HML_HOSTNAME" ]; then
     log "renaming host to '$HML_HOSTNAME'"
     OLD_HOSTNAME=$(cat "$TARGET/etc/hostname" 2>/dev/null || true)
-    bcp /etc/hostname
+    claim etc/hostname
     printf '%s\n' "$HML_HOSTNAME" > "$TARGET/etc/hostname"
-    bcp /etc/hosts
+    claim etc/hosts
     if [ -n "$OLD_HOSTNAME" ] && grep -qw "$OLD_HOSTNAME" "$TARGET/etc/hosts" 2>/dev/null; then
         sed -i "s/\\b$OLD_HOSTNAME\\b/$HML_HOSTNAME/g" "$TARGET/etc/hosts"
     else
@@ -147,7 +192,7 @@ fi
 if [ -e "$TARGET/etc/default/grub" ]; then
     log "theming GRUB (background + menu label)"
     put "$SYS/usr/share/desktop-base/hannah-montana-theme/grub/grub-16x9.png" boot/grub/hml-grub.png
-    bcp /etc/default/grub
+    claim etc/default/grub
     sed -i '/^GRUB_DISTRIBUTOR=/d;/^GRUB_BACKGROUND=/d;/^GRUB_THEME=/d' "$TARGET/etc/default/grub"
     printf '%s\n' \
         'GRUB_DISTRIBUTOR="Hannah Montana Linux 26"' \
@@ -161,16 +206,22 @@ if [ -d "$TARGET/usr/share/plymouth" ] || [ -d "$TARGET/etc/plymouth" ]; then
     OLD_PLYMOUTH_THEME=$(sed -n 's/^Theme=//p' "$TARGET/etc/plymouth/plymouthd.conf" 2>/dev/null | head -1)
     [ -n "$OLD_PLYMOUTH_THEME" ] || OLD_PLYMOUTH_THEME=$(sed -n 's/^Theme=//p' "$TARGET/usr/share/plymouth/plymouthd.defaults" 2>/dev/null | head -1)
     [ -n "$OLD_PLYMOUTH_THEME" ] || OLD_PLYMOUTH_THEME="bgrt"
-    bcp /etc/plymouth/plymouthd.conf
-    mkdir -p "$TARGET/etc/plymouth"
+    # Debian/Ubuntu/Mint without plymouth-set-default-theme: the initramfs hook
+    # takes the splash from the default.plymouth alternative, so remember its
+    # current mode and value for the restore kit.
+    if [ -f "$TARGET/var/lib/dpkg/alternatives/default.plymouth" ]; then
+        OLD_PLY_ALT_MODE=$(sed -n 1p "$TARGET/var/lib/dpkg/alternatives/default.plymouth")
+        PLY_ALT_LINK=$(sed -n 2p "$TARGET/var/lib/dpkg/alternatives/default.plymouth")
+        OLD_PLY_ALT=$(readlink "$TARGET/etc/alternatives/default.plymouth" 2>/dev/null || true)
+    fi
+    claim etc/plymouth/plymouthd.conf
     printf '[Daemon]\nTheme=hannah-montana\nShowDelay=0\n' > "$TARGET/etc/plymouth/plymouthd.conf"
 fi
 
 # ------------------------------------------------------- display manager ----
 if [ -d "$TARGET/etc/lightdm" ] || [ -e "$TARGET/usr/sbin/lightdm" ]; then
     log "theming LightDM greeter"
-    bcp /etc/lightdm/slick-greeter.conf
-    mkdir -p "$TARGET/etc/lightdm"
+    claim etc/lightdm/slick-greeter.conf
     printf '%s\n' \
         '[Greeter]' \
         'background=/usr/share/backgrounds/hannahmontanaifier/login.png' \
@@ -180,8 +231,7 @@ if [ -d "$TARGET/etc/lightdm" ] || [ -e "$TARGET/usr/sbin/lightdm" ]; then
 fi
 if [ -e "$TARGET/usr/bin/sddm" ] || [ -d "$TARGET/etc/sddm.conf.d" ]; then
     log "theming SDDM"
-    mkdir -p "$TARGET/etc/sddm.conf.d"
-    [ -e "$TARGET/etc/sddm.conf.d/kde_settings.conf" ] && bcp /etc/sddm.conf.d/kde_settings.conf || track etc/sddm.conf.d/kde_settings.conf
+    claim etc/sddm.conf.d/kde_settings.conf
     cp "$SYS/etc/sddm.conf.d/kde_settings.conf" "$TARGET/etc/sddm.conf.d/kde_settings.conf"
 fi
 # GDM's greeter reads dconf defaults from /etc/gdm3/greeter.dconf-defaults
@@ -190,9 +240,7 @@ fi
 # gresource — test-live.sh does that part on the live system).
 if [ -d "$TARGET/etc/gdm3" ] || [ -e "$TARGET/usr/sbin/gdm3" ]; then
     log "theming GDM greeter (logo + banner + icons)"
-    bcp /etc/gdm3/greeter.dconf-defaults
-    mkdir -p "$TARGET/etc/gdm3"
-    [ -e "$TARGET/etc/gdm3/greeter.dconf-defaults" ] || track etc/gdm3/greeter.dconf-defaults
+    claim etc/gdm3/greeter.dconf-defaults
     printf '%s\n' \
         '[org/gnome/login-screen]' \
         "logo='$LOGO'" \
@@ -220,19 +268,28 @@ dconf_wallpaper() {
     user="$1"
     [ "${HML_SKIP_CHROOT:-0}" = "1" ] && return 0   # done on the live system instead
     [ -x "$TARGET/usr/bin/gsettings" ] || return 0
-    cmd=""
+    [ -x "$TARGET/usr/bin/dbus-run-session" ] || return 0
+    keys=""
     if [ -e "$TARGET/usr/bin/cinnamon" ]; then
-        cmd="gsettings set org.cinnamon.desktop.background picture-uri 'file://$WALLPAPER'; gsettings set org.cinnamon.desktop.background picture-options 'zoom'; gsettings set org.cinnamon.desktop.interface icon-theme 'HannahMontana'"
+        keys="org.cinnamon.desktop.background picture-uri 'file://$WALLPAPER'
+org.cinnamon.desktop.background picture-options 'zoom'
+org.cinnamon.desktop.interface icon-theme 'HannahMontana'"
     elif [ -e "$TARGET/usr/bin/mate-session" ]; then
-        cmd="gsettings set org.mate.background picture-filename '$WALLPAPER'; gsettings set org.mate.interface icon-theme 'HannahMontana'"
+        keys="org.mate.background picture-filename '$WALLPAPER'
+org.mate.interface icon-theme 'HannahMontana'"
     elif [ -e "$TARGET/usr/bin/gnome-shell" ]; then
-        cmd="gsettings set org.gnome.desktop.background picture-uri 'file://$WALLPAPER'; gsettings set org.gnome.desktop.background picture-uri-dark 'file://$WALLPAPER'; gsettings set org.gnome.desktop.interface icon-theme 'HannahMontana'"
+        keys="org.gnome.desktop.background picture-uri 'file://$WALLPAPER'
+org.gnome.desktop.background picture-uri-dark 'file://$WALLPAPER'
+org.gnome.desktop.interface icon-theme 'HannahMontana'"
     fi
-    [ -n "$cmd" ] || return 0
-    if [ -x "$TARGET/usr/bin/dbus-run-session" ]; then
-        chroot "$TARGET" su - "$user" -c "dbus-run-session -- sh -c '$cmd'" 2>/dev/null \
-            || warn "dconf wallpaper failed for $user (non-fatal)"
-    fi
+    [ -n "$keys" ] || return 0
+    # One "schema key value" line per setting on stdin. Each key's current
+    # value is saved to $BACKUP/gsettings/<user> (same format) before the prank
+    # value is set, so the restore kit can put the user's own wallpaper back.
+    mkdir -p "$BACKUP/gsettings"
+    printf '%s\n' "$keys" | chroot "$TARGET" su - "$user" -c "dbus-run-session -- sh -c 'while read -r s k v; do old=\$(gsettings get \"\$s\" \"\$k\" 2>/dev/null) && printf \"%s %s %s\\n\" \"\$s\" \"\$k\" \"\$old\"; gsettings set \"\$s\" \"\$k\" \"\$v\"; done'" \
+        > "$BACKUP/gsettings/$user" 2>/dev/null \
+        || warn "dconf wallpaper failed for $user (non-fatal)"
 }
 
 if [ "${HML_SKIP_USERS:-0}" != "1" ]; then
@@ -267,6 +324,11 @@ elif chrootable && [ -e "$TARGET/usr/sbin/update-grub" -o -e "$TARGET/usr/sbin/p
     if [ -e "$TARGET/usr/sbin/plymouth-set-default-theme" ]; then
         chroot "$TARGET" plymouth-set-default-theme -R hannah-montana 2>/dev/null \
             || warn "plymouth theme activation failed (non-fatal)"
+    elif [ -n "$PLY_ALT_LINK" ] && [ -e "$TARGET/usr/bin/update-alternatives" ]; then
+        { chroot "$TARGET" update-alternatives --install "$PLY_ALT_LINK" default.plymouth "$HML_PLYMOUTH" 100 \
+            && chroot "$TARGET" update-alternatives --set default.plymouth "$HML_PLYMOUTH" \
+            && chroot "$TARGET" update-initramfs -u; } >/dev/null 2>&1 \
+            || warn "plymouth theme activation failed (non-fatal)"
     elif [ -e "$TARGET/usr/sbin/update-initramfs" ]; then
         chroot "$TARGET" update-initramfs -u 2>/dev/null \
             || warn "update-initramfs failed (non-fatal)"
@@ -291,9 +353,10 @@ BACKUP=/var/backups/hannahmontanaifier
 [ -d "\$BACKUP/files" ] || { echo "no backup found at \$BACKUP"; exit 1; }
 
 echo "[restore] putting original files back"
-( cd "\$BACKUP/files" && find . -type f | while read -r f; do
+( cd "\$BACKUP/files" && find . \( -type f -o -type l \) | while read -r f; do
     rel=\${f#./}
     mkdir -p "/\$(dirname "\$rel")"
+    { [ -L "\$f" ] || [ -L "/\$rel" ]; } && rm -f "/\$rel"
     cp -a "\$f" "/\$rel" && echo "  restored /\$rel"
 done )
 
@@ -302,21 +365,43 @@ while read -r rel; do
     [ -n "\$rel" ] && rm -rf "/\$rel" && echo "  removed /\$rel"
 done < "\$BACKUP/installed.list"
 
+echo "[restore] removing now-empty directories the prank created"
+# Deepest first (reverse sort puts children before parents); rmdir keeps any
+# directory that has gained other files since.
+sort -r "\$BACKUP/dirs.list" 2>/dev/null | while read -r rel; do
+    [ -n "\$rel" ] && rmdir "/\$rel" 2>/dev/null && echo "  removed /\$rel/"
+done
+
 if command -v plymouth-set-default-theme >/dev/null 2>&1; then
     echo "[restore] reverting plymouth theme to '$OLD_PLYMOUTH_THEME'"
     plymouth-set-default-theme -R "$OLD_PLYMOUTH_THEME" 2>/dev/null || \\
         update-initramfs -u 2>/dev/null || true
+elif command -v update-alternatives >/dev/null 2>&1 && [ -f /var/lib/dpkg/alternatives/default.plymouth ]; then
+    echo "[restore] reverting plymouth boot splash"
+    update-alternatives --remove default.plymouth "$HML_PLYMOUTH" >/dev/null 2>&1 || true
+    if [ "$OLD_PLY_ALT_MODE" = manual ] && [ -n "$OLD_PLY_ALT" ]; then
+        update-alternatives --set default.plymouth "$OLD_PLY_ALT" >/dev/null 2>&1 || true
+    fi
+    update-initramfs -u 2>/dev/null || true
 fi
 if command -v update-grub >/dev/null 2>&1; then
     echo "[restore] rebuilding GRUB config"
     update-grub 2>/dev/null || true
 fi
 
-# Reset per-user wallpaper/icon overrides back to desktop defaults.
+# Put each user's own wallpaper/icon settings back (saved as "schema key value"
+# lines at prank time); users without a saved copy are reset to desktop defaults.
 for home in /home/*; do
     [ -d "\$home" ] || continue
     user=\$(basename "\$home")
-    if command -v dbus-run-session >/dev/null 2>&1 && command -v gsettings >/dev/null 2>&1; then
+    saved="\$BACKUP/gsettings/\$user"
+    if ! command -v dbus-run-session >/dev/null 2>&1 || ! command -v gsettings >/dev/null 2>&1; then
+        continue
+    elif [ -s "\$saved" ]; then
+        echo "[restore] restoring wallpaper/icon settings for \$user"
+        su - "\$user" -c "dbus-run-session -- sh -c 'while read -r s k v; do gsettings set \"\\\$s\" \"\\\$k\" \"\\\$v\" 2>/dev/null; done; true'" \\
+            < "\$saved" 2>/dev/null || true
+    else
         su - "\$user" -c "dbus-run-session -- sh -c '
             gsettings reset org.cinnamon.desktop.background picture-uri 2>/dev/null
             gsettings reset org.cinnamon.desktop.interface icon-theme 2>/dev/null
