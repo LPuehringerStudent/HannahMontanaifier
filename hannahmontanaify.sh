@@ -44,8 +44,17 @@ fi
 BACKUP="$TARGET/var/backups/hannahmontanaifier"
 FILES="$BACKUP/files"          # mirrors absolute paths of overwritten originals
 INSTALLED="$BACKUP/installed.list"  # newly created files (deleted on restore)
+DIRS="$BACKUP/dirs.list"       # newly created parent dirs (rmdir'd on restore if empty)
 mkdir -p "$FILES"
 : >> "$INSTALLED"
+: >> "$DIRS"
+
+# Restore-kit state; the plymouth section overwrites these when it runs.
+OLD_PLYMOUTH_THEME=bgrt
+PLY_ALT_LINK=""       # Debian/Ubuntu/Mint default.plymouth alternative, if any
+OLD_PLY_ALT=""
+OLD_PLY_ALT_MODE=""
+HML_PLYMOUTH=/usr/share/plymouth/themes/hannah-montana/hannah-montana.plymouth
 
 # bcp <absolute path> — back up an existing target file before overwriting it.
 # A symlink is backed up as the link itself (cp -a), so restore puts the link back.
@@ -85,7 +94,18 @@ claim() {
     else
         track "$rel"
     fi
-    mkdir -p "$TARGET/$(dirname "$rel")"
+    mkparents "$rel"
+}
+
+# mkparents <relative path> — create the parent dirs of a target path,
+# recording each one that didn't exist so restore can remove it again.
+mkparents() {
+    d=$(dirname "$1")
+    while [ "$d" != . ] && [ "$d" != / ] && [ ! -d "$TARGET/$d" ]; do
+        grep -qxF "$d" "$DIRS" 2>/dev/null || printf '%s\n' "$d" >> "$DIRS"
+        d=$(dirname "$d")
+    done
+    mkdir -p "$TARGET/$(dirname "$1")"
 }
 
 # put <src> <dest relative path> — install a file, backing up any original.
@@ -101,7 +121,7 @@ put() {
 puttree() {
     src="$1"; rel="$2"
     [ -e "$TARGET/$rel" ] && existed=1 || { existed=0; track "$rel"; }
-    mkdir -p "$TARGET/$(dirname "$rel")"
+    mkparents "$rel"
     cp -a "$src" "$TARGET/$rel" || warn "install failed: /$rel"
     [ "$existed" = 1 ] || chown -R 0:0 "$TARGET/$rel" 2>/dev/null || true
 }
@@ -186,6 +206,14 @@ if [ -d "$TARGET/usr/share/plymouth" ] || [ -d "$TARGET/etc/plymouth" ]; then
     OLD_PLYMOUTH_THEME=$(sed -n 's/^Theme=//p' "$TARGET/etc/plymouth/plymouthd.conf" 2>/dev/null | head -1)
     [ -n "$OLD_PLYMOUTH_THEME" ] || OLD_PLYMOUTH_THEME=$(sed -n 's/^Theme=//p' "$TARGET/usr/share/plymouth/plymouthd.defaults" 2>/dev/null | head -1)
     [ -n "$OLD_PLYMOUTH_THEME" ] || OLD_PLYMOUTH_THEME="bgrt"
+    # Debian/Ubuntu/Mint without plymouth-set-default-theme: the initramfs hook
+    # takes the splash from the default.plymouth alternative, so remember its
+    # current mode and value for the restore kit.
+    if [ -f "$TARGET/var/lib/dpkg/alternatives/default.plymouth" ]; then
+        OLD_PLY_ALT_MODE=$(sed -n 1p "$TARGET/var/lib/dpkg/alternatives/default.plymouth")
+        PLY_ALT_LINK=$(sed -n 2p "$TARGET/var/lib/dpkg/alternatives/default.plymouth")
+        OLD_PLY_ALT=$(readlink "$TARGET/etc/alternatives/default.plymouth" 2>/dev/null || true)
+    fi
     claim etc/plymouth/plymouthd.conf
     printf '[Daemon]\nTheme=hannah-montana\nShowDelay=0\n' > "$TARGET/etc/plymouth/plymouthd.conf"
 fi
@@ -296,6 +324,11 @@ elif chrootable && [ -e "$TARGET/usr/sbin/update-grub" -o -e "$TARGET/usr/sbin/p
     if [ -e "$TARGET/usr/sbin/plymouth-set-default-theme" ]; then
         chroot "$TARGET" plymouth-set-default-theme -R hannah-montana 2>/dev/null \
             || warn "plymouth theme activation failed (non-fatal)"
+    elif [ -n "$PLY_ALT_LINK" ] && [ -e "$TARGET/usr/bin/update-alternatives" ]; then
+        { chroot "$TARGET" update-alternatives --install "$PLY_ALT_LINK" default.plymouth "$HML_PLYMOUTH" 100 \
+            && chroot "$TARGET" update-alternatives --set default.plymouth "$HML_PLYMOUTH" \
+            && chroot "$TARGET" update-initramfs -u; } >/dev/null 2>&1 \
+            || warn "plymouth theme activation failed (non-fatal)"
     elif [ -e "$TARGET/usr/sbin/update-initramfs" ]; then
         chroot "$TARGET" update-initramfs -u 2>/dev/null \
             || warn "update-initramfs failed (non-fatal)"
@@ -332,10 +365,24 @@ while read -r rel; do
     [ -n "\$rel" ] && rm -rf "/\$rel" && echo "  removed /\$rel"
 done < "\$BACKUP/installed.list"
 
+echo "[restore] removing now-empty directories the prank created"
+# Deepest first (reverse sort puts children before parents); rmdir keeps any
+# directory that has gained other files since.
+sort -r "\$BACKUP/dirs.list" 2>/dev/null | while read -r rel; do
+    [ -n "\$rel" ] && rmdir "/\$rel" 2>/dev/null && echo "  removed /\$rel/"
+done
+
 if command -v plymouth-set-default-theme >/dev/null 2>&1; then
     echo "[restore] reverting plymouth theme to '$OLD_PLYMOUTH_THEME'"
     plymouth-set-default-theme -R "$OLD_PLYMOUTH_THEME" 2>/dev/null || \\
         update-initramfs -u 2>/dev/null || true
+elif command -v update-alternatives >/dev/null 2>&1 && [ -f /var/lib/dpkg/alternatives/default.plymouth ]; then
+    echo "[restore] reverting plymouth boot splash"
+    update-alternatives --remove default.plymouth "$HML_PLYMOUTH" >/dev/null 2>&1 || true
+    if [ "$OLD_PLY_ALT_MODE" = manual ] && [ -n "$OLD_PLY_ALT" ]; then
+        update-alternatives --set default.plymouth "$OLD_PLY_ALT" >/dev/null 2>&1 || true
+    fi
+    update-initramfs -u 2>/dev/null || true
 fi
 if command -v update-grub >/dev/null 2>&1; then
     echo "[restore] rebuilding GRUB config"

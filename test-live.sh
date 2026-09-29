@@ -76,6 +76,16 @@ if command -v plymouth-set-default-theme >/dev/null 2>&1; then
     plymouth-set-default-theme -R hannah-montana 2>/dev/null \
         || update-initramfs -u 2>/dev/null \
         || warn "initramfs rebuild failed (non-fatal)"
+elif [ -f /var/lib/dpkg/alternatives/default.plymouth ] && command -v update-alternatives >/dev/null 2>&1; then
+    # Debian/Ubuntu/Mint: the initramfs hook takes the splash from the
+    # default.plymouth alternative. The restore kit removes this again.
+    log "activating Plymouth boot splash (default.plymouth alternative, rebuilds initramfs)"
+    hml_ply=/usr/share/plymouth/themes/hannah-montana/hannah-montana.plymouth
+    { update-alternatives --install "$(sed -n 2p /var/lib/dpkg/alternatives/default.plymouth)" \
+            default.plymouth "$hml_ply" 100 \
+        && update-alternatives --set default.plymouth "$hml_ply" \
+        && update-initramfs -u; } >/dev/null 2>&1 \
+        || warn "plymouth theme activation failed (non-fatal)"
 elif command -v update-initramfs >/dev/null 2>&1; then
     update-initramfs -u 2>/dev/null || warn "update-initramfs failed (non-fatal)"
 fi
