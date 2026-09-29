@@ -27,8 +27,8 @@ if [ -z "$LIVE_USER" ] || [ "$LIVE_USER" = "root" ]; then
     LIVE_USER=$(who 2>/dev/null | awk 'NR==1{print $1}')
 fi
 
-# 1) Revert the live session's wallpaper/icons right now.
-reset_live_wallpaper() {
+# 1) Restore the live session's own wallpaper/icons right now (reset only as fallback).
+restore_live_wallpaper() {
     [ -n "$LIVE_USER" ] || return 0
     uid=$(id -u "$LIVE_USER" 2>/dev/null) || return 0
     if   [ -e /usr/bin/cinnamon ];    then de=cinnamon
@@ -63,7 +63,7 @@ reset_live_wallpaper() {
             _gr org.gnome.desktop.interface icon-theme ;;
     esac
 }
-reset_live_wallpaper
+restore_live_wallpaper
 
 # 2) Put the original gnome-shell theme gresource back BEFORE the restore kit
 #    runs — the kit deletes /var/backups/hannahmontanaifier at the end, which is
